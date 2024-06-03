@@ -1,0 +1,64 @@
+from elasticsearch import Elasticsearch
+import os
+
+# Hardcoded file path
+FILE_PATH = '/datafiles/infadata/scripts/yourfile.txt'
+
+def read_file(file_path):
+    records = []
+    with open(file_path, 'r') as file:
+        # Skip the header line
+        next(file)
+        for line in file:
+            parts = line.strip().split(',')
+            if len(parts) == 3:
+                records.append({'custid': parts[0].strip(), 'firstname': parts[1].strip(), 'lastname': parts[2].strip()})
+    return records
+
+def search_and_update_in_elasticsearch(es, indices, record):
+    query = {
+        "bool": {
+            "must": [
+                {"term": {"custid": record['custid']}},
+                {"term": {"firstname": record['firstname']}},
+                {"term": {"lastname": record['lastname']}}
+            ]
+        }
+    }
+
+    updated = False
+    for index in indices:
+        result = es.search(index=index, body={"query": query})
+        hits = result['hits']['hits']
+        if hits:
+            for hit in hits:
+                doc_id = hit['_id']
+                es.update(index=index, id=doc_id, body={
+                    "doc": {
+                        "firstname": "ANONYMOUS",
+                        "lastname": ""
+                    }
+                })
+                updated = True
+    return updated
+
+def main():
+    # Hardcoded Elasticsearch host and list of indices
+    ES_HOST = 'http://localhost:9200'
+    ES_INDICES = ['tlogtranheader', 'tlogtender', 'tloglineitem']
+    
+    if not os.path.exists(FILE_PATH):
+        print("File not found!")
+        return
+    
+    es = Elasticsearch([ES_HOST])
+
+    records = read_file(FILE_PATH)
+    for record in records:
+        if search_and_update_in_elasticsearch(es, ES_INDICES, record):
+            print(f"Customer {record} - updated")
+        else:
+            print(f"Customer {record} - not found in Elasticsearch")
+
+if __name__ == "__main__":
+    main()
