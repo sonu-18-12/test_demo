@@ -1,0 +1,98 @@
+import os
+import logging
+from elasticsearch import Elasticsearch
+
+# Hardcoded file path
+FILE_PATH = '/datafiles/infadata/scripts/yourfile.txt'
+LOG_PATH = '/datafiles/infadata/elastic/Scripts/log/script.log'
+
+# Configure logging
+if not os.path.exists(os.path.dirname(LOG_PATH)):
+    os.makedirs(os.path.dirname(LOG_PATH))
+
+logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
+                    format='%(asctime)s %(levelname)s:%(message)s')
+
+def read_file(file_path):
+    records = []
+    with open(file_path, 'r') as file:
+        # Skip the header line
+        next(file)
+        for line in file:
+            parts = line.strip().split(',')
+            if len(parts) == 3:
+                records.append({'custid': parts[0].strip(), 'firstname': parts[1].strip(), 'lastname': parts[2].strip()})
+    return records
+
+def search_and_update_in_elasticsearch(es, indices, record):
+    query = {
+        "bool": {
+            "must": [
+                {"term": {"custid": record['custid']}},
+                {"term": {"firstname": record['firstname']}},
+                {"term": {"lastname": record['lastname']}}
+            ]
+        }
+    }
+
+    updated = False
+    missing_in_indices = []
+    for index in indices:
+        result = es.search(index=index, body={"query": query})
+        hits = result['hits']['hits']
+        if hits:
+            for hit in hits:
+                doc_id = hit['_id']
+                source = hit['_source']
+                update_body = {"doc": {}}
+                if 'firstname' in source:
+                    update_body["doc"]["firstname"] = "ANONYMOUS"
+                if 'lastname' in source:
+                    update_body["doc"]["lastname"] = f"anonymous{record['custid']}"
+                if 'fullname' in source:
+                    update_body["doc"]["fullname"] = f"anonymous{record['custid']}"
+
+                es.update(index=index, id=doc_id, body=update_body)
+                updated = True
+                logging.info(f"Updated document in index '{index}' with ID '{doc_id}': {update_body}")
+        else:
+            missing_in_indices.append(index)
+    return updated, missing_in_indices
+
+def main():
+    # Hardcoded Elasticsearch host and list of indices
+    ES_HOST = 'http://localhost:9200'
+    ES_INDICES = ['tlog_lineitem_*', 'tlog_tranheader_*', 'tlog_tax_*', 'tlog_tender_*']
+    
+    if not os.path.exists(FILE_PATH):
+        logging.error("File not found at path: " + FILE_PATH)
+        raise SystemExit("File not found at path: " + FILE_PATH)
+    
+    es = Elasticsearch([ES_HOST])
+
+    if not es.ping():
+        logging.error("Elasticsearch connection failed.")
+        raise SystemExit("Elasticsearch connection failed. Exiting the script.")
+    else:
+        logging.info("Elasticsearch is connected.")
+
+    records = read_file(FILE_PATH)
+    updated_customers_count = 0
+    updated_indices_count = set()
+
+    for record in records:
+        updated, missing_in_indices = search_and_update_in_elasticsearch(es, ES_INDICES, record)
+        if updated:
+            updated_customers_count += 1
+            updated_indices_count.update(missing_in_indices)
+            logging.info(f"Customer {record} - updated")
+        else:
+            logging.info(f"Customer {record} - not found in Elasticsearch")
+            logging.info(f"Missing in indices: {missing_in_indices}")
+
+    logging.info(f"Total customers updated: {updated_customers_count}")
+    logging.info(f"Indices updated: {updated_indices_count}")
+    logging.info(f"Total indices updated: {len(updated_indices_count)}")
+
+if __name__ == "__main__":
+    main()
