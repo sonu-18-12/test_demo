@@ -1,0 +1,138 @@
+import os
+import logging
+from elasticsearch import Elasticsearch
+
+# Hardcoded file path
+FILE_PATH = '/datafiles/infadata/scripts/yourfile.txt'
+LOG_PATH = '/datafiles/infadata/elastic/Scripts/log/script.log'
+
+# Configure logging
+if not os.path.exists(os.path.dirname(LOG_PATH)):
+    os.makedirs(os.path.dirname(LOG_PATH))
+
+logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
+                    format='%(asctime)s %(levelname)s:%(message)s')
+
+def read_file(file_path):
+    records = []
+    with open(file_path, 'r') as file:
+        # Skip the header line
+        next(file)
+        for line in file:
+            parts = line.strip().split(',')
+            if len(parts) == 3:
+                records.append({'custid': parts[0].strip(), 'firstname': parts[1].strip(), 'lastname': parts[2].strip()})
+    return records
+
+def get_indices_with_customer_columns(es):
+    # Get all indices
+    indices = es.indices.get_alias().keys()
+    indices_with_customer_columns = []
+
+    # Check each index for the required columns
+    for index in indices:
+        mapping = es.indices.get_mapping(index=index)
+        for field_name, field_props in mapping[index]['mappings']['properties'].items():
+            if field_name.lower() in ['custid', 'firstname', 'lastname']:
+                indices_with_customer_columns.append(index)
+                break
+
+    return indices_with_customer_columns
+
+def search_and_update_in_elasticsearch(es, indices, record):
+    query = {
+        "bool": {
+            "must": [
+                {"term": {"custid": record['custid']}},
+                {"term": {"firstname": record['firstname']}},
+                {"term": {"lastname": record['lastname']}}
+            ]
+        }
+    }
+
+    updated = False
+    missing_in_indices = []
+    for index in indices:
+        result = es.search(index=index, body={"query": query})
+        hits = result['hits']['hits']
+        if hits:
+            first_match = True
+            for hit in hits:
+                doc_id = hit['_id']
+                source = hit['_source']
+                update_body = {"doc": {}}
+                # Anonymize the first match
+                if first_match:
+                    update_body["doc"]["firstname"] = "ANONYMOUS"
+                    update_body["doc"]["lastname"] = f"ANONYMOUS{record['custid']}"
+                    if 'addressline1' in source:
+                        update_body["doc"]["addressline1"] = f"ANONYMOUS{record['custid']}"
+                    if 'country' in source:
+                        update_body["doc"]["country"] = ""
+                    if 'zipcode' in source:
+                        update_body["doc"]["zipcode"] = ""
+                    if 'addressline2' in source:
+                        update_body["doc"]["addressline2"] = ""
+                    if 'addressline3' in source:
+                        update_body["doc"]["addressline3"] = ""
+                    if 'age' in source:
+                        update_body["doc"]["age"] = ""
+                    if 'emailaddress' in source:
+                        update_body["doc"]["emailaddress"] = f"nonvalidemail{record['custid']}@tiffany.com"
+                    if 'ereceiptemail' in source:
+                        update_body["doc"]["ereceiptemail"] = f"nonvalidemail{record['custid']}@tiffany.com"
+                    if 'telephoneno' in source:
+                        update_body["doc"]["telephoneno"] = "0000"
+                    if 'gender' in source:
+                        update_body["doc"]["gender"] = ""
+                    es.update(index=index, id=doc_id, body=update_body)
+                    updated = True
+                    logging.info(f"Updated document in index '{index}' with ID '{doc_id}': {update_body}")
+                    first_match = False
+                else:
+                    # Delete the duplicate matches
+                    es.delete(index=index, id=doc_id)
+                    logging.info(f"Deleted document in index '{index}' with ID '{doc_id}'")
+        else:
+            missing_in_indices.append(index)
+    return updated, missing_in_indices
+
+def main():
+    # Hardcoded Elasticsearch host
+    ES_HOST = 'http://localhost:9200'
+
+    es = Elasticsearch([ES_HOST])
+
+    if not es.ping():
+        logging.error("Elasticsearch connection failed.")
+        raise SystemExit("Elasticsearch connection failed. Exiting the script.")
+    else:
+        logging.info("Elasticsearch is connected.")
+
+    # Get indices with customer columns
+    ES_INDICES = get_indices_with_customer_columns(es)
+    if not ES_INDICES:
+        logging.error("No indices found with customer columns.")
+        raise SystemExit("No indices found with customer columns. Exiting the script.")
+
+    # Rest of the code remains the same
+    records = read_file(FILE_PATH)
+    updated_customers_count = 0
+    updated_indices_count = set()
+
+    for record in records:
+        updated, missing_in_indices = search_and_update_in_elasticsearch(es, ES_INDICES, record)
+        if updated:
+            updated_customers_count += 1
+            updated_indices_count.update(missing_in_indices)
+            logging.info(f"Customer {record} - updated")
+        else:
+            logging.info(f"Customer {record} - not found in Elasticsearch")
+            logging.info(f"Missing in indices: {missing_in_indices}")
+
+    logging.info(f"Total customers updated: {updated_customers_count}")
+    logging.info(f"Indices updated: {updated_indices_count}")
+    logging.info(f"Total indices updated: {len(updated_indices_count)}")
+
+if __name__ == "__main__":
+    main()
