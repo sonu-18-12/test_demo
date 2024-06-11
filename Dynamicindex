@@ -1,0 +1,138 @@
+import os
+import logging
+from elasticsearch import Elasticsearch
+
+# Hardcoded file path
+FILE_PATH = '/datafiles/infadata/scripts/yourfile.txt'
+LOG_PATH = '/datafiles/infadata/elastic/Scripts/log/script.log'
+
+# Configure logging
+if not os.path.exists(os.path.dirname(LOG_PATH)):
+    os.makedirs(os.path.dirname(LOG_PATH))
+
+logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
+                    format='%(asctime)s %(levelname)s:%(message)s')
+
+def read_file(file_path):
+    records = []
+    with open(file_path, 'r') as file:
+        # Skip the header line
+        next(file)
+        for line in file:
+            parts = line.strip().split(',')
+            if len(parts) == 3:
+                records.append({'custid': parts[0].strip(), 'firstname': parts[1].strip(), 'lastname': parts[2].strip()})
+    return records
+
+def get_indices_with_customerid_field(es):
+    # Get all indices
+    all_indices = es.indices.get_alias().keys()
+    indices_with_customerid = []
+
+    # Check each index for the CustomerID field
+    for index in all_indices:
+        mapping = es.indices.get_mapping(index=index)
+        properties = mapping[index]['mappings'].get('properties', {})
+        if 'CustomerID' in properties:
+            indices_with_customerid.append(index)
+    
+    return indices_with_customerid
+
+def search_and_update_in_elasticsearch(es, indices, record):
+    query = {
+        "bool": {
+            "must": [
+                {"term": {"CustomerID": record['custid']}},
+                {"term": {"FirstName": record['firstname']}},
+                {"term": {"LastName": record['lastname']}}
+            ]
+        }
+    }
+
+    updated = False
+    missing_in_indices = []
+    for index in indices:
+        result = es.search(index=index, body={"query": query, "size": 1000})  # Adjust size as needed
+        hits = result['hits']['hits']
+        print(f"Index: {index}")
+        if hits:
+            first_doc_id = hits[0]['_id']
+            print(f"First matching ID: {first_doc_id}")
+            for hit in hits:
+                doc_id = hit['_id']
+                source = hit['_source']
+                update_body = {"doc": {}}
+                # Update firstname
+                update_body["doc"]["FirstName"] = "ANONYMOUS"
+                # Update lastname
+                update_body["doc"]["LastName"] = f"ANONYMOUS{record['custid']}"
+                # Update additional columns
+                if 'AddressLine1' in source:
+                    update_body["doc"]["AddressLine1"] = f"ANONYMOUS{record['custid']}"
+                if 'Country' in source:
+                    update_body["doc"]["Country"] = ""
+                if 'ZipCode' in source:
+                    update_body["doc"]["ZipCode"] = ""
+                if 'AddressLine2' in source:
+                    update_body["doc"]["AddressLine2"] = ""
+                if 'AddressLine3' in source:
+                    update_body["doc"]["AddressLine3"] = ""
+                if 'Age' in source:
+                    update_body["doc"]["Age"] = ""
+                if 'EmailAddress' in source:
+                    update_body["doc"]["EmailAddress"] = f"nonvalidemail{record['custid']}@tiffany.com"
+                if 'EReceiptEmail' in source:
+                    update_body["doc"]["EReceiptEmail"] = f"nonvalidemail{record['custid']}@tiffany.com"
+                if 'TelephoneNo' in source:
+                    update_body["doc"]["TelephoneNo"] = "0000"
+                if 'Gender' in source:
+                    update_body["doc"]["Gender"] = ""
+                es.update(index=index, id=doc_id, body=update_body)
+                updated = True
+                print(f"Updated document in index '{index}' with ID '{doc_id}': {update_body}")
+        else:
+            missing_in_indices.append(index)
+    return updated, missing_in_indices
+
+def main():
+    # Elasticsearch host
+    ES_HOST = 'http://localhost:9200'
+    
+    if not os.path.exists(FILE_PATH):
+        logging.error("File not found at path: " + FILE_PATH)
+        raise SystemExit("File not found at path: " + FILE_PATH)
+    
+    es = Elasticsearch([ES_HOST])
+
+    if not es.ping():
+        logging.error("Elasticsearch connection failed.")
+        raise SystemExit("Elasticsearch connection failed. Exiting the script.")
+    else:
+        logging.info("Elasticsearch is connected.")
+
+    records = read_file(FILE_PATH)
+    indices = get_indices_with_customerid_field(es)
+    
+    if not indices:
+        logging.error("No indices found with the CustomerID field.")
+        raise SystemExit("No indices found with the CustomerID field. Exiting the script.")
+    
+    updated_customers_count = 0
+    updated_indices_count = set()
+
+    for record in records:
+        updated, missing_in_indices = search_and_update_in_elasticsearch(es, indices, record)
+        if updated:
+            updated_customers_count += 1
+            updated_indices_count.update(missing_in_indices)
+            print(f"Customer {record} - updated")
+        else:
+            print(f"Customer {record} - not found in Elasticsearch")
+            print(f"Missing in indices: {missing_in_indices}")
+
+    print(f"Total customers updated: {updated_customers_count}")
+    print(f"Indices updated: {updated_indices_count}")
+    print(f"Total indices updated: {len(updated_indices_count)}")
+
+if __name__ == "__main__":
+    main()
