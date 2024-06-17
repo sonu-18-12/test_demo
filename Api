@@ -1,0 +1,22 @@
+GET /_search
+{
+  "_source": false,
+  "query": {
+    "bool": {
+      "must": [
+        { "term": { "CustomerID": "12345" } },
+        { "term": { "FirstName": "John" } },
+        { "term": { "LastName": "Doe" } }
+      ]
+    }
+  },
+  "size": 0,
+  "aggs": {
+    "indices": {
+      "terms": {
+        "field": "_index",
+        "size": 10000
+      }
+    }
+  }
+}
