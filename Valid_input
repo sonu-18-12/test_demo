@@ -1,0 +1,156 @@
+import os
+import logging
+from datetime import datetime, timedelta
+from elasticsearch import Elasticsearch
+
+# Hardcoded file path
+FILE_PATH = '/datafiles/infadata/scripts/yourfile.txt'
+LOG_PATH = '/datafiles/infadata/elastic/Scripts/log/script_' + datetime.now().strftime('%Y%m%d%H%M%S') + '.log'
+
+# Configure logging
+if not os.path.exists(os.path.dirname(LOG_PATH)):
+    os.makedirs(os.path.dirname(LOG_PATH))
+
+logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
+                    format='%(asctime)s %(levelname)s:%(message)s')
+
+def read_file(file_path):
+    records = []
+    errors = []
+    with open(file_path, 'r') as file:
+        next(file)  # Skip the header line
+        for line_num, line in enumerate(file, start=2):  # Start at 2 to account for header
+            parts = line.strip().split(',')
+            if len(parts) != 3 or line.strip() != ','.join(parts):
+                error_msg = f"Invalid format in file at line {line_num}: {line.strip()}"
+                logging.error(error_msg)
+                errors.append(error_msg)
+                continue
+            
+            custid, firstname, lastname = parts[0].strip(), parts[1].strip(), parts[2].strip()
+
+            # Validate custid is an integer
+            if not custid.isdigit():
+                error_msg = f"Invalid custid (not an integer) at line {line_num}: {custid}"
+                logging.error(error_msg)
+                errors.append(error_msg)
+                continue
+
+            # Validate firstname and lastname are strings with alphabetic characters
+            if not firstname.isalpha() or not lastname.isalpha():
+                error_msg = f"Invalid firstname or lastname (not alphabetic) at line {line_num}: {firstname}, {lastname}"
+                logging.error(error_msg)
+                errors.append(error_msg)
+                continue
+
+            record = {'custid': custid, 'firstname': firstname, 'lastname': lastname}
+            records.append(record)
+            print(f"Customer to be anonymized: {record}")
+    
+    if errors:
+        logging.error("The following errors were found in the input file:")
+        for error in errors:
+            logging.error(error)
+        raise ValueError("Invalid records found in the input file. Check log for details.")
+    
+    return records
+
+def get_indices_with_customerid_field(es):
+    # Get all indices
+    all_indices = es.indices.get_alias().keys()
+    indices_with_customerid = []
+
+    # Check each index for the CustomerID field
+    for index in all_indices:
+        mapping = es.indices.get_mapping(index=index)
+        properties = mapping[index]['mappings'].get('properties', {})
+        if 'CustomerID' in properties:
+            indices_with_customerid.append(index)
+    
+    return indices_with_customerid
+
+def search_and_update_in_elasticsearch(es, indices, record):
+    query = {
+        "bool": {
+            "must": [
+                {"term": {"CustomerID": record['custid']}},
+                {"term": {"FirstName": record['firstname']}},
+                {"term": {"LastName": record['lastname']}}
+            ]
+        }
+    }
+
+    matched_info = {}  # Track matching information for each index
+    for index in indices:
+        result = es.search(index=index, body={"query": query, "size": 1000})  # Adjust size as needed
+        hits = result['hits']['hits']
+        if hits:
+            doc_ids_to_delete = [hit['_id'] for hit in hits[1:]]  # Collect IDs to delete, excluding the first one
+            if doc_ids_to_delete:
+                es.delete_by_query(index=index, body={"query": {"ids": {"values": doc_ids_to_delete}}})
+                print(f"Deleted documents in index '{index}' with IDs: {doc_ids_to_delete}")
+
+            first_doc_id = hits[0]['_id']
+            update_body = {"doc": {
+                "FirstName": "ANONYMOUS",
+                "LastName": f"ANONYMOUS{record['custid']}",
+                "MiddleName": "",
+                "EmailAddress": "ANONYMOUS",
+                "ValidEmailAddress": "ANONYMOUS",
+                "AddressLine1": "ANONYMOUS"
+            }}
+            es.update(index=index, id=first_doc_id, body=update_body)
+            print(f"Updated document in index '{index}' with ID '{first_doc_id}': {update_body}")
+            matched_info[index] = {
+                "matched_count": len(hits),
+                "deleted_ids": doc_ids_to_delete,
+                "updated_id": first_doc_id
+            }
+    return matched_info
+
+def main():
+    # Elasticsearch host
+    ES_HOST = 'http://localhost:9200'
+    
+    if not os.path.exists(FILE_PATH):
+        logging.error("File not found at path: " + FILE_PATH)
+        raise SystemExit("File not found at path: " + FILE_PATH)
+    
+    es = Elasticsearch([ES_HOST])
+
+    if not es.ping():
+        logging.error("Elasticsearch connection failed.")
+        raise SystemExit("Elasticsearch connection failed. Exiting the script.")
+    else:
+        logging.info("Elasticsearch is connected.")
+
+    records = read_file(FILE_PATH)
+    indices = get_indices_with_customerid_field(es)
+    
+    if not indices:
+        logging.error("No indices found with the CustomerID field.")
+        raise SystemExit("No indices found with the CustomerID field. Exiting the script.")
+    
+    print("Below indices will be scanned:")
+    for index in indices:
+        print(index)
+    
+    total_indices_updated = 0
+    total_customers_processed = 0
+
+    for record in records:
+        matched_info = search_and_update_in_elasticsearch(es, indices, record)
+        if matched_info:
+            total_customers_processed += 1
+            total_indices_updated += len(matched_info)
+            print(f"Customer {record} - updated in indices: {list(matched_info.keys())}")
+            for index, info in matched_info.items():
+                print(f"Index: {index}, Matched documents: {info['matched_count']}, Deleted IDs: {info['deleted_ids']}, Updated ID: {info['updated_id']}")
+        else:
+            print(f"Customer {record} - not found in any indices")
+
+    print(f"Total indices updated: {total_indices_updated}")
+    print(f"Total customers processed: {total_customers_processed}")
+
+if __name__ == "__main__":
+    main()
