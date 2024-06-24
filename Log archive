@@ -1,0 +1,139 @@
+import os
+import logging
+from datetime import datetime, timedelta
+from elasticsearch import Elasticsearch
+
+# Hardcoded file path
+FILE_PATH = '/datafiles/infadata/scripts/yourfile.txt'
+LOG_DIR = '/datafiles/infadata/elastic/Scripts/log'
+
+# Ensure the log directory exists
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+
+# Generate a unique log file name based on current timestamp
+log_file_name = f"script_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+LOG_PATH = os.path.join(LOG_DIR, log_file_name)
+
+# Configure logging
+logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
+                    format='%(asctime)s %(levelname)s:%(message)s')
+
+def read_file(file_path):
+    records = []
+    with open(file_path, 'r') as file:
+        # Skip the header line
+        next(file)
+        for line in file:
+            parts = line.strip().split(',')
+            if len(parts) == 3:
+                records.append({'custid': parts[0].strip(), 'firstname': parts[1].strip(), 'lastname': parts[2].strip()})
+    return records
+
+def get_indices_with_customerid_field(es):
+    # Get all indices
+    all_indices = es.indices.get_alias().keys()
+    indices_with_customerid = []
+
+    # Check each index for the CustomerID field
+    for index in all_indices:
+        mapping = es.indices.get_mapping(index=index)
+        properties = mapping[index]['mappings'].get('properties', {})
+        if 'CustomerID' in properties:
+            indices_with_customerid.append(index)
+    
+    return indices_with_customerid
+
+def search_and_update_in_elasticsearch(es, indices, record):
+    query = {
+        "bool": {
+            "must": [
+                {"term": {"CustomerID": record['custid']}},
+                {"term": {"FirstName": record['firstname']}},
+                {"term": {"LastName": record['lastname']}}
+            ]
+        }
+    }
+
+    updated = False
+    missing_in_indices = []
+    for index in indices:
+        result = es.search(index=index, body={"query": query, "size": 1000})  # Adjust size as needed
+        hits = result['hits']['hits']
+        logging.info(f"Index: {index}")
+        if hits:
+            first_doc_id = hits[0]['_id']
+            logging.info(f"First matching ID: {first_doc_id}")
+            for hit in hits:
+                doc_id = hit['_id']
+                source = hit['_source']
+                update_body = {"doc": {}}
+                # Update columns as needed
+                update_body["doc"]["FirstName"] = "ANONYMOUS"
+                update_body["doc"]["LastName"] = f"ANONYMOUS{record['custid']}"
+                if 'AddressLine1' in source:
+                    update_body["doc"]["AddressLine1"] = f"ANONYMOUS{record['custid']}"
+                if 'EmailAddress' in source:
+                    update_body["doc"]["EmailAddress"] = f"nonvalidemail{record['custid']}@tiffany.com"
+                # Update additional columns as required
+
+                # Perform update operation
+                es.update(index=index, id=doc_id, body=update_body)
+                updated = True
+                logging.info(f"Updated document in index '{index}' with ID '{doc_id}': {update_body}")
+        else:
+            missing_in_indices.append(index)
+    return updated, missing_in_indices
+
+def delete_old_logs(log_dir, max_age_days=90):
+    current_time = datetime.now()
+    for filename in os.listdir(log_dir):
+        file_path = os.path.join(log_dir, filename)
+        if os.path.isfile(file_path):
+            creation_time = datetime.fromtimestamp(os.path.getctime(file_path))
+            age_in_days = (current_time - creation_time).days
+            if age_in_days > max_age_days:
+                os.remove(file_path)
+                logging.info(f"Deleted old log file: {file_path}")
+
+def main():
+    # Elasticsearch host
+    ES_HOST = 'http://localhost:9200'
+    es = Elasticsearch([ES_HOST])
+    
+    if not es.ping():
+        logging.error("Elasticsearch connection failed.")
+        raise SystemExit("Elasticsearch connection failed. Exiting the script.")
+    else:
+        logging.info("Elasticsearch is connected.")
+
+    records = read_file(FILE_PATH)
+    indices = get_indices_with_customerid_field(es)
+    
+    if not indices:
+        logging.error("No indices found with the CustomerID field.")
+        raise SystemExit("No indices found with the CustomerID field. Exiting the script.")
+    
+    updated_customers_count = 0
+    updated_indices_count = set()
+
+    for record in records:
+        updated, missing_in_indices = search_and_update_in_elasticsearch(es, indices, record)
+        if updated:
+            updated_customers_count += 1
+            updated_indices_count.update(missing_in_indices)
+            logging.info(f"Customer {record} - updated")
+        else:
+            logging.info(f"Customer {record} - not found in Elasticsearch")
+            logging.info(f"Missing in indices: {missing_in_indices}")
+
+    logging.info(f"Total customers updated: {updated_customers_count}")
+    logging.info(f"Indices updated: {updated_indices_count}")
+    logging.info(f"Total indices updated: {len(updated_indices_count)}")
+
+    # Delete old log files (older than 3 months)
+    delete_old_logs(LOG_DIR, max_age_days=90)
+    logging.info("Old log files cleanup completed.")
+
+if __name__ == "__main__":
+    main()
