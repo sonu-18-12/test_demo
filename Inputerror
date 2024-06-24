@@ -17,16 +17,29 @@ logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
 def read_file(file_path):
     records = []
     with open(file_path, 'r') as file:
-        # Skip the header line
-        next(file)
+        next(file)  # Skip the header line
         for line_num, line in enumerate(file, start=2):  # Start at 2 to account for header
             parts = line.strip().split(',')
             if len(parts) != 3 or line.strip() != ','.join(parts):
                 logging.error(f"Invalid format in file at line {line_num}: {line.strip()}")
                 raise ValueError(f"Invalid format in file at line {line_num}: {line.strip()}")
-            record = {'custid': parts[0].strip(), 'firstname': parts[1].strip(), 'lastname': parts[2].strip()}
+            
+            custid, firstname, lastname = parts[0].strip(), parts[1].strip(), parts[2].strip()
+
+            # Validate custid is an integer
+            if not custid.isdigit():
+                logging.error(f"Invalid custid (not an integer) at line {line_num}: {custid}")
+                raise ValueError(f"Invalid custid (not an integer) at line {line_num}: {custid}")
+
+            # Validate firstname and lastname are strings
+            if not isinstance(firstname, str) or not isinstance(lastname, str):
+                logging.error(f"Invalid firstname or lastname (not a string) at line {line_num}: {firstname}, {lastname}")
+                raise ValueError(f"Invalid firstname or lastname (not a string) at line {line_num}: {firstname}, {lastname}")
+
+            record = {'custid': custid, 'firstname': firstname, 'lastname': lastname}
             records.append(record)
             print(f"Customer to be anonymized: {record}")
+    
     return records
 
 def get_indices_with_customerid_field(es):
