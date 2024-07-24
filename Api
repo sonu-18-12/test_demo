@@ -15,3 +15,37 @@ GET _search
     }
   }
 }
+
+
+GET _search
+{
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "exists": {
+            "field": "Title"
+          }
+        },
+        {
+          "script": {
+            "script": {
+              "source": "doc['Title'].value != ''",
+              "lang": "painless"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "size": 0,
+  "aggs": {
+    "indices": {
+      "terms": {
+        "field": "_index",
+        "size": 1000
+      }
+    }
+  }
+}
+
