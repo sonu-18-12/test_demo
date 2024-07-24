@@ -49,3 +49,45 @@ GET _search
   }
 }
 
+
+
+GET _search
+{
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "exists": {
+            "field": "Title"
+          }
+        },
+        {
+          "script": {
+            "script": {
+              "source": "doc['Title'].value != ''",
+              "lang": "painless"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "_source": ["Title"],  // This will return the 'Title' field in the response
+  "size": 10,  // Adjust the size as needed to return the number of documents you want to see
+  "sort": [
+    {
+      "_index": {
+        "order": "asc"
+      }
+    }
+  ]
+}
+
+
+
+
+
+
+
+
+
