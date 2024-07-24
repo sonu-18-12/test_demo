@@ -1,13 +1,8 @@
-GET /_search
+GET _search
 {
-  "_source": false,
   "query": {
-    "bool": {
-      "must": [
-        { "term": { "CustomerID": "12345" } },
-        { "term": { "FirstName": "John" } },
-        { "term": { "LastName": "Doe" } }
-      ]
+    "exists": {
+      "field": "Title"
     }
   },
   "size": 0,
@@ -15,7 +10,7 @@ GET /_search
     "indices": {
       "terms": {
         "field": "_index",
-        "size": 10000
+        "size": 1000
       }
     }
   }
