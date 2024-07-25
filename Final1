@@ -7,9 +7,9 @@ from elasticsearch import Elasticsearch
 FILE_PATH = '/datafiles/infadata/scripts/yourfile.txt'
 LOG_PATH_TEMPLATE = '/datafiles/infadata/elastic/Scripts/log/script_{}.log'
 
-# Configure logging based on current date
-current_date = datetime.datetime.now().strftime('%Y%m%d')
-LOG_PATH = LOG_PATH_TEMPLATE.format(current_date)
+# Configure logging based on the system date
+system_date = datetime.datetime.now().strftime('%Y%m%d')
+LOG_PATH = LOG_PATH_TEMPLATE.format(system_date)
 
 if not os.path.exists(os.path.dirname(LOG_PATH)):
     os.makedirs(os.path.dirname(LOG_PATH))
@@ -17,15 +17,44 @@ if not os.path.exists(os.path.dirname(LOG_PATH)):
 logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
                     format='%(asctime)s %(levelname)s:%(message)s')
 
+def delete_old_logs(log_dir, days=90):
+    """Delete log files older than 'days' days."""
+    now = datetime.datetime.now()
+    cutoff = now - datetime.timedelta(days=90)
+
+    for filename in os.listdir(log_dir):
+        file_path = os.path.join(log_dir, filename)
+        if os.path.isfile(file_path):
+            file_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(file_path))
+            if file_mtime < cutoff:
+                os.remove(file_path)
+                logging.info(f"Deleted old log file: {file_path}")
+
 def read_file(file_path):
+    """Read customer IDs from the input file."""
     records = []
+    errors = []
+
     with open(file_path, 'r') as file:
-        # Skip the header line
-        next(file)
-        for line in file:
-            parts = line.strip().split(',')
-            if len(parts) == 3:
-                records.append({'custid': parts[0].strip(), 'firstname': parts[1].strip(), 'lastname': parts[2].strip()})
+        for line_num, line in enumerate(file, start=1):
+            # Remove trailing comma and strip spaces
+            cleaned_line = line.strip().rstrip(',')
+            parts = [part.strip() for part in cleaned_line.split(',') if part.strip()]
+
+            for custid in parts:
+                if not custid.isdigit():
+                    error_msg = f"Invalid custid (not an integer) at line {line_num}: {custid}"
+                    logging.error(error_msg)
+                    errors.append(error_msg)
+                else:
+                    records.append(custid)
+
+    if errors:
+        logging.error("The following errors were found in the input file:")
+        for error in errors:
+            logging.error(error)
+        raise ValueError("Invalid records found in the input file. Check log for details.")
+
     return records
 
 def get_indices_with_customerid_field(es):
@@ -40,13 +69,11 @@ def get_indices_with_customerid_field(es):
     
     return indices_with_customerid
 
-def search_delete_update_in_elasticsearch(es, indices, record):
+def search_delete_update_in_elasticsearch(es, indices, custid):
     query = {
         "bool": {
             "must": [
-                {"term": {"CustomerID": record['custid']}},
-                {"term": {"FirstName": record['firstname']}},
-                {"term": {"LastName": record['lastname']}}
+                {"term": {"CustomerID": custid}}
             ]
         }
     }
@@ -54,23 +81,21 @@ def search_delete_update_in_elasticsearch(es, indices, record):
     matched_info = {}
     unmatched_info = []
     updated_indices = []
+
     for index in indices:
         result = es.search(index=index, body={"query": query, "size": 1000})
         hits = result['hits']['hits']
-        if hits:
-            first_doc_id = hits[0]['_id']
-            print(f"Index: {index}")
-            print(f"First matching ID: {first_doc_id}")
 
-            if len(hits) > 1:
-                doc_ids_to_delete = [hit['_id'] for hit in hits[1:]]
+        if hits:
+            doc_ids_to_delete = [hit['_id'] for hit in hits[1:]]
+            first_doc_id = hits[0]['_id']
+            
+            if doc_ids_to_delete:
                 delete_query = {
                     "query": {
                         "bool": {
                             "must": [
-                                {"term": {"CustomerID": record['custid']}},
-                                {"term": {"FirstName": record['firstname']}},
-                                {"term": {"LastName": record['lastname']}},
+                                {"term": {"CustomerID": custid}},
                                 {"ids": {"values": doc_ids_to_delete}}
                             ]
                         }
@@ -79,19 +104,20 @@ def search_delete_update_in_elasticsearch(es, indices, record):
                 es.delete_by_query(index=index, body=delete_query)
                 print(f"Deleted documents in index '{index}' with IDs: {doc_ids_to_delete}")
 
-            # Update the first document
-            update_body = {
-                "doc": {
-                    "FirstName": "Anonymous",
-                    "LastName": f"Anonymous{record['custid']}",
-                    "MiddleName": "",
-                    "EmailAddress": "Anonymous",
-                    "ValidEmailAddress": "Anonymous",
-                    "AddressLine1": "Anonymous"
+            # Update all matched documents
+            for hit in hits:
+                update_body = {
+                    "doc": {
+                        "FirstName": "Anonymous",
+                        "LastName": f"Anonymous{custid}",
+                        "MiddleName": "",
+                        "EmailAddress": "Anonymous",
+                        "ValidEmailAddress": "Anonymous",
+                        "AddressLine1": "Anonymous"
+                    }
                 }
-            }
-            es.update(index=index, id=first_doc_id, body=update_body)
-            print(f"Updated document in index '{index}' with ID '{first_doc_id}': {update_body}")
+                es.update(index=index, id=hit['_id'], body=update_body)
+                print(f"Updated document in index '{index}' with ID '{hit['_id']}': {update_body}")
 
             matched_info[index] = {
                 'total_matched': len(hits),
@@ -103,6 +129,21 @@ def search_delete_update_in_elasticsearch(es, indices, record):
             unmatched_info.append(index)
 
     return matched_info, unmatched_info, updated_indices
+
+def take_backup(es, snapshot_repo, snapshot_name):
+    """Take a backup of all indices."""
+    response = es.snapshot.create(
+        repository=snapshot_repo,
+        snapshot=snapshot_name,
+        body={
+            "indices": "_all",
+            "ignore_unavailable": True,
+            "include_global_state": False
+        },
+        wait_for_completion=True
+    )
+    print("Snapshot created:", response)
+    logging.info(f"Snapshot created: {response}")
 
 def main():
     # Elasticsearch host
@@ -119,54 +160,40 @@ def main():
         logging.error("File not found at path: " + FILE_PATH)
         raise SystemExit("File not found at path: " + FILE_PATH)
 
+    # Take a snapshot before proceeding
+    SNAPSHOT_REPO = 'my_backup_repo'  # replace with your snapshot repository name
+    SNAPSHOT_NAME = f'snapshot_{system_date}'
+    take_backup(es, SNAPSHOT_REPO, SNAPSHOT_NAME)
+
     records = read_file(FILE_PATH)
     indices = get_indices_with_customerid_field(es)
-    
+
     if not indices:
         logging.error("No indices found with the CustomerID field.")
         raise SystemExit("No indices found with the CustomerID field. Exiting the script.")
 
+    # Print indices that will be scanned
+    print("Below indices will be scanned:")
+    for index in indices:
+        print(index)
+    
     total_indices_scanned = 0
     total_docs_deleted = 0
     total_docs_updated = 0
     total_records_processed = 0
     total_indices_updated = set()
 
-    for record in records:
+    for custid in records:
         total_records_processed += 1
-        matched_info, unmatched_info, updated_indices = search_delete_update_in_elasticsearch(es, indices, record)
+        matched_info, unmatched_info, updated_indices = search_delete_update_in_elasticsearch(es, indices, custid)
         total_indices_scanned += len(indices)
+
+        print(f"Scanned indices for custid {custid}: {indices}")
+        logging.info(f"Scanned indices for custid {custid}: {indices}")
 
         if matched_info:
             for index, info in matched_info.items():
                 total_docs_deleted += len(info['deleted_ids'])
-                total_docs_updated += 1  # Since we are updating the first document
+                total_docs_updated += len(info['deleted_ids']) + len(info['first_doc_id'])  # Since we are updating all documents
                 total_indices_updated.add(index)
-                print(f"Record {record} found in index '{index}' with {info['total_matched']} matches.")
-                print(f"First document ID kept: {info['first_doc_id']}")
-                print(f"Deleted document IDs: {info['deleted_ids']}")
-                logging.info(f"Record {record} found in index '{index}' with {info['total_matched']} matches.")
-                logging.info(f"First document ID kept: {info['first_doc_id']}")
-                logging.info(f"Deleted document IDs: {info['deleted_ids']}")
-        else:
-            print(f"Record {record} did not match any documents in the scanned indices.")
-            logging.info(f"Record {record} did not match any documents in the scanned indices.")
-
-        print(f"Record {record} did not match in the following indices: {unmatched_info}")
-        logging.info(f"Record {record} did not match in the following indices: {unmatched_info}")
-        print(f"Record {record} updated in the following indices: {updated_indices}")
-        logging.info(f"Record {record} updated in the following indices: {updated_indices}")
-
-    print(f"Total records processed: {total_records_processed}")
-    print(f"Total indices scanned: {total_indices_scanned}")
-    print(f"Total documents deleted: {total_docs_deleted}")
-    print(f"Total documents updated: {total_docs_updated}")
-    print(f"Total indices updated: {len(total_indices_updated)}")
-    logging.info(f"Total records processed: {total_records_processed}")
-    logging.info(f"Total indices scanned: {total_indices_scanned}")
-    logging.info(f"Total documents deleted: {total_docs_deleted}")
-    logging.info(f"Total documents updated: {total_docs_updated}")
-    logging.info(f"Total indices updated: {len(total_indices_updated)}")
-
-if __name__ == "__main__":
-    main()
+                print(f"Customer ID {custid} found in index '{index}'
